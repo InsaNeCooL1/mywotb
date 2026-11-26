@@ -1,0 +1,13 @@
+{
+  "name": "mywotb",
+  "version": "0.1.0",
+  "description": "Легкий сайт для статистики та сесій гравця World of Tanks Blitz (EU)",
+  "private": true,
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
