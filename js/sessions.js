@@ -108,7 +108,14 @@ function tankTable(before, after, dict, totalD) {
   </div>`;
 }
 
-function activePanel(a) {
+function accountOptions(ctx, a) {
+  const recent = (ctx.recent || []).filter((p) => String(p.account_id) !== String(a.accountId));
+  const own = `<option value="${esc(a.accountId)}" selected>${esc(a.nickname)} (поточна)</option>`;
+  const list = recent.map((p) => `<option value="${esc(p.account_id)}">${esc(p.nickname)}</option>`).join('');
+  return own + list + '<option value="new">＋ Інший акаунт…</option>';
+}
+
+function activePanel(a, ctx) {
   const d = delta(a.totalBefore, a.totalLatest);
   return `
     <div class="session-hero active">
@@ -118,6 +125,10 @@ function activePanel(a) {
           <div class="session-hero-sub">Гравець <b>${esc(a.nickname)}</b> · початок ${esc(fmtDate(a.startedAt))} · дані від ${esc(fmtDate(a.lastSyncAt || a.startedAt))}</div>
         </div>
         <span class="meta-pill accent">● LIVE</span>
+      </div>
+      <div class="session-account-row">
+        <span class="session-account-label">Акаунт сесії</span>
+        <select id="session-account" class="account-select" aria-label="Акаунт сесії">${accountOptions(ctx, a)}</select>
       </div>
       <input class="note-input" id="session-note" type="text" maxlength="160"
              placeholder="Нотатка до сесії (необов'язково)" value="${esc(a.note || '')}">
@@ -197,7 +208,7 @@ export async function renderSessions(view, ctx) {
   // Сесії безперервні: якщо активної немає — стартуємо одразу.
   if (!sessionsState.active && ctx.player) await startSession(ctx, true);
   const dict = await vehicles();
-  view.innerHTML = (sessionsState.active ? activePanel(sessionsState.active) : idlePanel(ctx))
+  view.innerHTML = (sessionsState.active ? activePanel(sessionsState.active, ctx) : idlePanel(ctx))
     + historyPanel(ctx, dict);
   bind(view, ctx, dict);
   if (sessionsState.active) await updateLiveTanks(view, dict);
@@ -213,6 +224,22 @@ async function updateLiveTanks(view, dict) {
 
 function bind(view, ctx) {
   view.querySelector('#finish-session')?.addEventListener('click', () => finishSession(view, ctx));
+
+  view.querySelector('#session-account')?.addEventListener('change', async (event) => {
+    const id = event.target.value;
+    if (id === 'new') {
+      document.getElementById('player-search')?.focus();
+      toast('Введіть нікнейм — сесію буде переведено на цього гравця');
+      return;
+    }
+    const player = (ctx.recent || []).find((p) => String(p.account_id) === String(id));
+    if (!player) return;
+    await switchAccount(ctx, player);
+    // Щоб глобальний вибір гравця не розходився з акаунтом сесії.
+    window.dispatchEvent(new CustomEvent('wotb:player', { detail: player }));
+    await renderSessions(view, ctx);
+    toast(`Сесія переведена на ${player.nickname}`, 'success');
+  });
 
   view.querySelector('#clear-history')?.addEventListener('click', async () => {
     if (!confirm('Видалити всю історію сесій?')) return;
@@ -246,6 +273,16 @@ function bind(view, ctx) {
   });
 }
 
+function makeActive(accountId, snap) {
+  const now = Date.now() / 1000;
+  return {
+    id: uid(), accountId, nickname: snap.nickname,
+    startedAt: now, lastSyncAt: now, note: '',
+    totalBefore: snap.total, totalLatest: snap.total,
+    tanksBefore: snap.tanks, tanksLatest: snap.tanks,
+  };
+}
+
 async function fetchSnapshot(accountId) {
   const [info, tanks] = await Promise.all([
     api.accountInfo(accountId),
@@ -263,18 +300,37 @@ export async function startSession(ctx, silent = false) {
   if (!ctx.player) { if (!silent) toast('Спочатку оберіть гравця', 'error'); return; }
   try {
     const snap = await fetchSnapshot(ctx.player.account_id);
-    const now = Date.now() / 1000;
-    sessionsState.active = {
-      id: uid(), accountId: ctx.player.account_id, nickname: snap.nickname,
-      startedAt: now, lastSyncAt: now, note: '',
-      totalBefore: snap.total, totalLatest: snap.total,
-      tanksBefore: snap.tanks, tanksLatest: snap.tanks,
-    };
+    sessionsState.active = makeActive(ctx.player.account_id, snap);
     save();
     scheduleAutoRefresh();
     if (!silent) toast('Сесію почато — статистику зафіксовано', 'success');
   } catch (err) {
     if (!silent) toast(err.message || 'Не вдалося почати сесію', 'error');
+  }
+}
+
+/** Перевести поточну сесію на інший акаунт: стару зберігаємо, нову стартуємо одразу. */
+export async function switchAccount(ctx, player) {
+  const a = sessionsState.active;
+  if (!a || String(a.accountId) === String(player.account_id)) return;
+  try {
+    // Закриваємо стару сесію саме по її акаунту — незалежно від вибраного гравця.
+    const oldSnap = await fetchSnapshot(a.accountId);
+    const endedAt = Date.now() / 1000;
+    sessionsState.history.push({
+      id: a.id, accountId: a.accountId, nickname: a.nickname,
+      startedAt: a.startedAt, endedAt, durationSec: Math.round(endedAt - a.startedAt),
+      note: a.note || '',
+      totalBefore: a.totalBefore, totalAfter: oldSnap.total,
+      tanksBefore: a.tanksBefore, tanksAfter: oldSnap.tanks,
+      deltas: delta(a.totalBefore, oldSnap.total),
+    });
+    const newSnap = await fetchSnapshot(player.account_id);
+    sessionsState.active = makeActive(player.account_id, newSnap);
+    save();
+    scheduleAutoRefresh();
+  } catch (err) {
+    toast(err.message || 'Не вдалося змінити акаунт сесії', 'error');
   }
 }
 
@@ -319,13 +375,7 @@ export async function finishSession(view, ctx) {
       deltas: delta(a.totalBefore, snap.total),
     });
     // Одна сесія одразу змінюється наступною — таймер і кнопка старту не потрібні.
-    const now = Date.now() / 1000;
-    sessionsState.active = {
-      id: uid(), accountId: a.accountId, nickname: snap.nickname,
-      startedAt: now, lastSyncAt: now, note: '',
-      totalBefore: snap.total, totalLatest: snap.total,
-      tanksBefore: snap.tanks, tanksLatest: snap.tanks,
-    };
+    sessionsState.active = makeActive(a.accountId, snap);
     save();
     scheduleAutoRefresh();
     toast('Сесію збережено — почато нову', 'success');
@@ -356,7 +406,7 @@ export function initSessionTimers() {
 }
 
 /** Підтягнути дані з хмари (викликає app.js після входу). */
-export function applyCloudData(data) {
+export function applyCloudData(data, accountId = null) {
   if (!data) return;
   const cloudHistory = (data.history || []).map(normalize);
   const merged = new Map(sessionsState.history.map((s) => [s.id, s]));
@@ -365,7 +415,11 @@ export function applyCloudData(data) {
     if (!local || (s.endedAt || 0) > (local.endedAt || 0)) merged.set(s.id, s);
   });
   sessionsState.history = [...merged.values()];
-  if (!sessionsState.active && data.active) sessionsState.active = normalize(data.active);
+  // Не підміняємо поточну сесію чужим акаунтом з іншого пристрою.
+  if (!sessionsState.active && data.active
+      && (!accountId || String(data.active.accountId) === String(accountId))) {
+    sessionsState.active = normalize(data.active);
+  }
   writeJSON(LS.active, sessionsState.active || null);
   writeJSON(LS.sessions, sessionsState.history);
 }

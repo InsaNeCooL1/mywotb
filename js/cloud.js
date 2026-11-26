@@ -15,6 +15,7 @@ export const cloud = {
   error: null,
   listeners: new Set(),
   _pushTimer: null,
+  _playerTimer: null,
 
   onChange(fn) {
     this.listeners.add(fn);
@@ -90,6 +91,31 @@ export const cloud = {
       history: (rows || []).map((r) => r.user_data).filter(Boolean),
       active: activeRows?.user_data || null,
     };
+  },
+
+  /** Вибраний гравець зберігається разом з акаунтом Supabase. */
+  async pullPlayer() {
+    if (!this.isOn()) return null;
+    const { data, error } = await this.client.from('user_library')
+      .select('user_data').eq('user_id', this.user.id).eq('item_key', 'wotb.player').maybeSingle();
+    if (error) throw error;
+    return data?.user_data || null;
+  },
+
+  savePlayer(player) {
+    if (!this.isOn() || !player) return;
+    clearTimeout(this._playerTimer);
+    this._playerTimer = setTimeout(() => {
+      this.savePlayerNow(player).catch((err) => console.warn('[wotb cloud player]', err));
+    }, 500);
+  },
+
+  async savePlayerNow(player) {
+    if (!this.isOn() || !player) return;
+    const { error } = await this.client.from('user_library').upsert({
+      user_id: this.user.id, item_key: 'wotb.player', user_data: player,
+    }, { onConflict: 'user_id,item_key' });
+    if (error) throw error;
   },
 
   /** Debounced upsert — не дергаємо хмару на кожен дрібний чин. */

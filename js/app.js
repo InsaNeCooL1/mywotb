@@ -1,11 +1,11 @@
 'use strict';
 
-import { DEFAULT_NICKNAME, LS } from './config.js';
+import { LS } from './config.js';
 import { api } from './api.js';
 import { readJSON, writeJSON } from './storage.js';
 import { esc, initials, toast } from './ui.js';
 import { renderProfile } from './profile.js';
-import { renderSessions, sessionsState, sessionCount, initSessionTimers, refreshSession, applyCloudData } from './sessions.js';
+import { renderSessions, sessionsState, sessionCount, initSessionTimers, refreshSession, applyCloudData, switchAccount } from './sessions.js';
 import { cloud } from './cloud.js';
 
 const els = {
@@ -34,6 +34,7 @@ const els = {
 
 const ctx = {
   player: readJSON(LS.player),
+  recent: readJSON(LS.recent, []) || [],
   tab: 'profile',
   loadPlayer,
 };
@@ -59,6 +60,7 @@ window.addEventListener('hashchange', () => {
   const tab = location.hash.slice(1);
   if (tab !== ctx.tab) setTab(tab);
 });
+window.addEventListener('wotb:player', (event) => applyPlayer(event.detail));
 
 /* ---------------- Пошук гравця ---------------- */
 async function loadPlayer(nickname) {
@@ -71,18 +73,29 @@ async function loadPlayer(nickname) {
   try {
     const player = await api.findPlayer(name);
     if (!player) { toast('Гравця не знайдено в регіоні EU', 'error'); return; }
-    ctx.player = player;
-    writeJSON(LS.player, player);
-    updateAvatar();
-    els.search.value = player.nickname;
+    await applyPlayer(player);
     toast(`Обрано: ${player.nickname}`, 'success');
-    if (ctx.tab === 'profile') renderProfile(els.profile, ctx);
-    else renderSessions(els.sessions, ctx);
   } catch (err) {
     toast(err.message || 'Помилка пошуку', 'error');
   } finally {
     els.searchBtn.textContent = '↵';
   }
+}
+
+/** Єдина точка зміни гравця: локально, у хмарі й у поточній сесії. */
+async function applyPlayer(player, fromCloud = false) {
+  const changed = !ctx.player || String(ctx.player.account_id) !== String(player.account_id);
+  ctx.player = player;
+  writeJSON(LS.player, player);
+  ctx.recent = [player, ...ctx.recent.filter((p) => String(p.account_id) !== String(player.account_id))].slice(0, 8);
+  writeJSON(LS.recent, ctx.recent);
+  updateAvatar();
+  els.search.value = player.nickname;
+  if (!fromCloud) cloud.savePlayer(player);
+
+  if (changed && sessionsState.active) await switchAccount(ctx, player);
+  if (ctx.tab === 'profile') renderProfile(els.profile, ctx);
+  else renderSessions(els.sessions, ctx);
 }
 
 function updateAvatar() {
@@ -264,7 +277,7 @@ async function syncNow() {
   if (!cloud.isOn()) { toast('Спочатку увійдіть в акаунт', 'error'); return; }
   try {
     const data = await cloud.pull();
-    applyCloudData(data);
+    applyCloudData(data, ctx.player?.account_id);
     await cloud.pushNow(sessionsState.history, sessionsState.active);
     updateCount();
     if (ctx.tab === 'sessions') renderSessions(els.sessions, ctx);
@@ -287,7 +300,18 @@ els.authLogout.addEventListener('click', async () => {
 cloud.onChange(async (kind) => {
   updateAuthUI();
   if (kind !== 'auth' || !cloud.isOn()) return;
-  await syncNow();
+  try {
+    // Вибраний гравець прив'язаний до акаунта Supabase, а не до браузера.
+    const cloudPlayer = await cloud.pullPlayer();
+    if (cloudPlayer && (!ctx.player || String(ctx.player.account_id) !== String(cloudPlayer.account_id))) {
+      await applyPlayer(cloudPlayer, true);
+    } else if (ctx.player && !cloudPlayer) {
+      await cloud.savePlayerNow(ctx.player);
+    }
+    await syncNow();
+  } catch (err) {
+    toast(`Помилка синхронізації акаунта: ${err.message}`, 'error');
+  }
 });
 
 /* ---------------- PWA ---------------- */
@@ -317,10 +341,18 @@ setAuthMode('login');
 if (ctx.player) els.search.value = ctx.player.nickname;
 setTab(location.hash.slice(1) || 'profile');
 initSessionTimers(ctx);
+
+// Сесія завжди має належати вибраному гравцю — навіть після перезавантаження.
+if (ctx.player && sessionsState.active
+    && String(sessionsState.active.accountId) !== String(ctx.player.account_id)) {
+  switchAccount(ctx, ctx.player).then(() => {
+    if (ctx.tab === 'sessions') renderSessions(els.sessions, ctx);
+  });
+}
 cloud.init();
 
-// Перше відкриття — одразу показуємо наповнений макет.
-if (!ctx.player) loadPlayer(DEFAULT_NICKNAME);
+// Без збереженого гравця не підміняємо його демо-акаунтом: користувач обирає сам.
+// Якщо є акаунт Supabase — viewer буде підтягнутий з хмари в onChange('auth').
 
 // Лічильник сесій оновлюємо разом із таймером.
 setInterval(updateCount, 2000);

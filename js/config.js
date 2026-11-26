@@ -12,6 +12,7 @@ export const LS = {
   player: 'mywotb.player.v1',
   sessions: 'mywotb.sessions.v1',
   active: 'mywotb.active.v1',
+  recent: 'mywotb.recent.v1',
 };
 
 // Поля, які Ми свідомо НЕ беремо / не рахуємо: WN7, WN8, WTR.
