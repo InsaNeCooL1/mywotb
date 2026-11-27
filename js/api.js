@@ -1,6 +1,6 @@
 'use strict';
 
-import { APP_ID, API_BASE } from './config.js';
+import { APP_ID, API_BASE, TANK_NAME_OVERRIDES } from './config.js';
 
 let vehiclesCache = null;
 
@@ -62,7 +62,13 @@ export const api = {
 
   /** Довідник машин (назви, рівні, іконки). Кешуємо в пам'яті. */
   async vehicles() {
-    if (!vehiclesCache) vehiclesCache = await request('encyclopedia/vehicles');
+    if (!vehiclesCache) {
+      const dict = await request('encyclopedia/vehicles');
+      for (const [id, name] of Object.entries(TANK_NAME_OVERRIDES)) {
+        dict[id] = { ...(dict[id] || {}), name };
+      }
+      vehiclesCache = dict;
+    }
     return vehiclesCache;
   },
 };

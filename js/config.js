@@ -24,3 +24,10 @@ export const STAT_FIELDS = [
 ];
 
 export const LIVE_REFRESH_MS = 60000;
+
+// Машини, яких немає у wotb/encyclopedia/vehicles — доповнюємо вручну.
+export const TANK_NAME_OVERRIDES = {
+  20081: 'AC Celeno',
+  19841: 'SDP wz 66 Grom',
+  19825: 'AC Atlas',
+};
